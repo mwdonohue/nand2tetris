@@ -1,0 +1,200 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/05/CPU.hdl
+
+/**
+ * The Hack CPU (Central Processing unit), consisting of an ALU,
+ * two registers named A and D, and a program counter named PC.
+ * The CPU is designed to fetch and execute instructions written in 
+ * the Hack machine language. In particular, functions as follows:
+ * Executes the inputted instruction according to the Hack machine 
+ * language specification. The D and A in the language specification
+ * refer to CPU-resident registers, while M refers to the external
+ * memory location addressed by A, i.e. to Memory[A]. The inM input 
+ * holds the value of this location. If the current instruction needs 
+ * to write a value to M, the value is placed in outM, the address 
+ * of the target location is placed in the addressM output, and the 
+ * writeM control bit is asserted. (When writeM==0, any value may 
+ * appear in outM). The outM and writeM outputs are combinational: 
+ * they are affected instantaneously by the execution of the current 
+ * instruction. The addressM and pc outputs are clocked: although they 
+ * are affected by the execution of the current instruction, they commit 
+ * to their new values only in the next time step. If reset==1 then the 
+ * CPU jumps to address 0 (i.e. pc is set to 0 in next time step) rather 
+ * than to the address resulting from executing the current instruction. 
+ */
+
+
+
+CHIP CPU {
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    // Questions:
+    // 
+    // Notes
+    // 1. The CPU fetches an instruction on every cycle
+    // 2. Putting a value in the address register has the side effect of selecting a particular memory register.
+    // 3. The D-Register is just used for storing data
+    // 4. The A-Register can be used for storing data, pointing at an address in the instruction memory, or pointing at an address in the data memory
+    // 5. The i bit codes the instruction type: 0 for an A instruction and 1 for a C instruction
+    //      1. If it is an A instruction, it is treated as a 16 bit binary value which is loaded into the A register
+    //      2. If it is a C instruction, the instruction is treated as a sequence of control bits that determine which function the ALU should compute
+    //          1. Furthermore the CPU will write the ALU's computation into a subset of the {A, D, and M} registers
+    //          2. If one of the registers is M, the CPU asserts the writeM control bit output
+    // 6. The CPU figures out which instruction in the program should be fetched and executed next
+    // 7. The CPU is connected to the instruction memory (from which it can read) and a data memory for which it can read and write
+    // 8. More notes about C instructions
+    //      1. The a and c bits code the "comp" part of the instruction
+    //      2. The d and j bits code the destination and jump parts of the instruction
+    //      3. The a bit determines whether the ALU will operate on the A register or on the M input
+    //      4. The c bits determine which function the ALU should compute
+    //      5. The d bits determine whether the registers should "accept" the ALU output
+    //      6. The j bits are for branching
+    // 9. Branching
+    //      1. If you want to restart the program's execution, you feed the PC the reset bit
+    //      2. The default operation of the counter is to increment
+    //      3. Branching will never happen on an A instruction, even though it depends on what the A register holds
+    //      4. "if jump, then PC = A, else PC++"
+    //      5. The value of the "jump" variable depends on the j bits and the ALU output
+    //      6. Asserting the load bit will allow us to do the operation PC = A
+    // 10. An A instruction will never, itself, write into memory
+
+    // i  x  x  a  c  c  c c c c d d d j j j 
+    // 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0
+
+    // First Mux
+    // Inputs:
+    //      Output from ALU
+    //      Instruction
+    //      Control bit (explained)
+    // Output:
+    //      Either the instruction or the ALU output to the A register (explained)
+    // Logic and Control Bits:
+    //      The control bit is the i bit. If the i bit is 1, the instruction is a C instruction.
+    //      If the instruction is a C instruction, the output from the ALU may or may not be loaded into the A register, but the A register will deal with that
+    //          and thus the ALU output should be passed regardless of whether the A register will load it
+    Mux16(a=instruction, b=ALUtoFirstMux, sel=instruction[15], out = FirstMux);
+
+    // A Register
+    // Inputs:
+    //      Output from first mux
+    //      Control bit (explained)
+    // Output:
+    //      Previous written value or newly writen value. Both will either be an A instruction or ALU output (C instruction)
+    // Logic and Control bits:
+    //      If you receive an A instruction or you receive a C instruction and instruction[5] is 1, set the control bit to 1
+    And(a= instruction[15], b= instruction[5], out=candi5);
+    // We do this so we can make that if we get an A instruction, it satisfies the conditional above
+    Not(in = instruction[15], out=notA);
+    Or(a=notA, b=candi5, out=regAcontrolbit);
+    ARegister(in=FirstMux, load=regAcontrolbit, out=AtoSecondMux, out[0..14]=addressM, out=AtoPCOut);
+
+    // Second Mux
+    // Inputs:
+    //      Output from A register
+    //      inM data
+    // Output:
+    //      Output from A register
+    //      inM data
+    // Logic and Control bits
+    //      This is deciding whether we are going to feed the (A Instruction or ALU) or M input
+    //      If the instruction is a C instruction (instruction[15] == 1) and instruction[12] == 1 (which means we will use the memory), switch to inM, otherwise use A
+    And(a = instruction[15], b = instruction[12], out=secondmuxcontrol);
+    Mux16(a = AtoSecondMux, b = inM, sel = secondmuxcontrol, out = SecondMux);
+
+    // D Register
+    // Inputs:
+    //      Output from ALU
+    //      Control bit
+    // Output:
+    //      Register for ALU
+    // Logic and Control bits
+    //      We are deciding on whether we should store the ALU output. This will obviously be done if its control bit is equal to 1
+    //      The A instruction will never deal with the D register. So as long as we are receiving an A instruction and instruction[4] == 1,
+    //      we will load the value passed to the D register
+    And(a = instruction[15], b = instruction[4], out = dregctrl);
+    DRegister(in=ALUtoDOut, load= dregctrl, out= DtoALUOut);
+
+    // ALU
+    // Funnily enough the most straightforward!
+    ALU(x=DtoALUOut, y=SecondMux, zx=instruction[11], nx=instruction[10], zy=instruction[9],ny=instruction[8], f=instruction[7], no= instruction[6], out=outM, out = ALUtoDOut, out=ALUtoFirstMux, zr= zrres, ng=ngres);
+
+     // writeM side note
+     // We will only be sending things to addressM when we are currently working with a C instruction
+     And(a = instruction[15], b = instruction[3], out=writeM);
+
+     // The Program Counter
+     // Pain and Suffering
+     // Input:
+     //     Output from A register
+     //     reset control bit
+     //     "jump" control bit
+     // Output:
+     //     PC
+     // Logic and control bits
+     //     You will jump such that the jump condition is satisfied (use zr and ng bits) AND
+     //     the instruction is a C instruction
+
+     ThreeToOne(one= instruction[2], two= instruction[1], three= instruction[0], out = jumpnum);
+     DMux8Way(in=true, sel=jumpnum, a=null, b=jgt, c=jeq, d=jge, e=jlt, f=jne, g=jle, h=jmp);
+     Not(in = zrres, out = notzr);
+     Not(in = ngres, out = notng);
+
+     // null condition
+     And(a = false, b = false, out = nullcond);
+
+     // jgt condition
+     And(a = notng, b = notzr, out = jgtcond);
+
+     // jeq condition
+     // just zero
+
+     // jge condition
+     Or(a=jgtcond, b = zrres, out = jgecond);
+
+     // jlt condition
+     // Just ng
+
+     // jne condition
+     // Just notzr
+
+     // jle condition
+     Or(a=ngres, b = zrres, out = jlecond);
+
+     // jmp cond
+     And(a = true, b= true, out = jmpcond);
+
+     And(a = null, b = nullcond, out = prefinalnull);
+     And(a = jgt, b = jgtcond, out = prefinaljgt);
+     And(a = jeq, b = zrres, out = prefinaljeq);
+     And(a = jge, b = jgecond, out = prefinaljge);
+     And(a = jlt, b = ngres, out = prefinaljlt);
+     And(a = jne, b = notzr, out = prefinaljne);
+     And(a = jle, b = jlecond, out = prefinaljle);
+     And(a = jmp, b = jmpcond, out = prefinaljmp);
+
+     Or(a = prefinalnull, b = prefinaljgt, out = res1);
+     Or(a = res1, b = prefinaljeq, out = res2);
+     Or(a = res2, b = prefinaljge, out = res3);
+     Or(a = res3, b = prefinaljlt, out = res4);
+     Or(a = res4, b = prefinaljne, out = res5);
+     Or(a = res5, b = prefinaljle, out = res6);
+     Or(a = res6, b = prefinaljmp, out = prefinalans);
+
+     And(a = prefinalans, b=instruction[15], out = pccontrolbit);
+
+     PC(in=AtoPCOut, load=pccontrolbit, inc=true, reset=reset, out[0..14]=pc);
+
+
+}

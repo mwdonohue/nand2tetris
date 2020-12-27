@@ -1,0 +1,9 @@
+ CHIP ThreeToOne {
+    IN one,two,three;
+    OUT out[3];
+
+    PARTS:
+    Or(a=one, b=false, out = out[2]);
+    Or(a=two, b=false, out = out[1]);
+    Or(a=three, b=false, out = out[0]);
+}
